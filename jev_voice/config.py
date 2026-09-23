@@ -27,8 +27,21 @@ JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL", ROOT / "models" / "ggml-base.en.bin"))
 WHISPER_PORT = int(os.environ.get("WHISPER_PORT", "8178"))
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "6"))
+# Source language ("en", "zh", or "auto" to detect) and whether to translate the result
+# to English (needs a multilingual model, not the .en ones).
+WHISPER_LANG = os.environ.get("WHISPER_LANG", "en")
+WHISPER_TRANSLATE = os.environ.get("WHISPER_TRANSLATE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 SAMPLE_RATE = 16000
+
+# Voice-activity detection / endpointing tuning.
+VAD_START_FRAMES = int(os.environ.get("VAD_START_FRAMES", "3"))
+VAD_END_SILENCE_MS = int(os.environ.get("VAD_END_SILENCE_MS", "550"))
+VAD_MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "250"))
+VAD_MAX_SPEECH_MS = int(os.environ.get("VAD_MAX_SPEECH_MS", "12000"))
+VAD_PRE_ROLL_MS = int(os.environ.get("VAD_PRE_ROLL_MS", "240"))
+VAD_THRESHOLD_MULT = float(os.environ.get("VAD_THRESHOLD_MULT", "3.5"))
+
 TTS_VOICE = os.environ.get("TTS_VOICE", "Samantha")
 TTS_RATE = int(os.environ.get("TTS_RATE", "210"))
 

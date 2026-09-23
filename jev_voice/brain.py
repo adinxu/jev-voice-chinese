@@ -12,9 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-
-from . import actions, config
+from . import actions, config, net
 
 ACTIONS: dict[str, str] = {
     "open_app": "Launch, open, switch to, or bring up an application program on the Mac (for example Chrome, Cursor, Slack, Finder, Terminal, Notes)",
@@ -83,14 +81,31 @@ _TEXT_PATTERNS = [
     r"^(?:please\s+)?(?:can you\s+|could you\s+)?(?:type|write|enter|dictate|input|put|insert|say|send|text|paste)(?:\s+in|\s+out|\s+the\s+words?|\s+the\s+text|\s+this|\s+that)?[:,]?\s+(?P<t>.+)$",
     r"^(?:please\s+)?(?:can you\s+|could you\s+)?(?:search|google|look\s*up|find|look\s+for|show\s+me|pull\s+up)(?:\s+(?:on|in)\s+\w+(?:\s+\w+)?)?(?:\s+for)?[:,]?\s+(?P<t>.+)$",
     r"^.*?\b(?:for|about|of|on)\s+(?P<t>.+)$",
+    # Chinese: type / input
+    r"^(?:请|麻烦|帮我|帮忙)?(?:把)?(?:输入|打字|键入|录入|写上|写下|打上|写|敲|粘贴|发送)[:：，,]?\s*(?P<t>.+)$",
+    # Chinese: search
+    r"^(?:请|麻烦|帮我|帮忙)?(?:搜索一下|搜索|搜一下|搜|查找|查一下|查询|查|找一下|找|谷歌一下|谷歌|百度一下|百度)[:：，,]?\s*(?P<t>.+)$",
+    # Chinese: the verb anywhere ("打开备忘录输入买牛奶")
+    r"^.*?(?:输入|打字|键入|录入|写上|打上|搜索一下|搜索|搜一下|查找|查一下|查询|找一下|谷歌|百度)\s*(?P<t>.+)$",
+    # Chinese: strip a leading "X 上的/里的" qualifier ("youtube 上的 lofi 音乐")
+    r"^.*?(?:上的|里的|里面的|中的)\s*(?P<t>.+)$",
     r"[\"“'](?P<t>[^\"”']+)[\"”']",
 ]
 _TITLE = re.compile(r"\b(?:called|titled|named|labeled|that says|saying|with the title)\s+(?P<t>.+)$", re.I)
+_TITLE_ZH = re.compile(r"(?:叫做|叫|名为|标题是|名字叫|名称是|写的是|写着)\s*(?P<t>.+)$")
 _TRAILING_IN_APP = re.compile(r"\s+(?:in|into|inside|on)\s+(?:the\s+)?(?:[A-Z][\w.]*|notes|chrome|cursor|safari|slack|mail|messages|terminal|finder)(?:\s+app)?\s*[.!?]?$")
 _TRAILING_SUBMIT = re.compile(
-    r"[\s,.]*(?:and|then)?\s*(?:hit|press|and)\s+(?:enter|return|send|submit)\s*[.!]?$", re.I
+    r"(?:[\s,.]*(?:and|then)?\s*(?:hit|press|and)\s+(?:enter|return|send|submit)\s*[.!]?$)"
+    r"|(?:[\s,，。]*(?:然后|并|再)?\s*(?:按|敲|点|回车键|回车|发送|提交|搜索)\s*[。.!！]?$)",
+    re.I,
 )
 _SPLIT_COMPOUND = re.compile(r"\s*(?:,\s*)?\b(?:and then|then|and also|and)\b\s*", re.I)
+_SPLIT_COMPOUND_ZH = re.compile(r"\s*(?:，|,)?\s*(?:然后|之后|接着|再|并且|以及)\s*")
+# "打开备忘录输入买牛奶" -> open the app, then do the verb in it
+_OPEN_THEN_VERB = re.compile(
+    r"^(?:请|麻烦|帮我|帮忙)?(打开|启动|运行|去|切到|切换到)(.+?)"
+    r"(输入|打字|键入|写上|写下|搜索一下|搜索|搜一下|搜|查找|查一下)\s*(.+)$"
+)
 
 
 def _clean(s: str) -> str:
@@ -109,6 +124,9 @@ def text_candidates(utterance: str) -> dict[str, str]:
             cands.append(t)
 
     m = _TITLE.search(utterance)
+    if m:
+        add(m.group("t"))
+    m = _TITLE_ZH.search(utterance)
     if m:
         add(m.group("t"))
     for pat in _TEXT_PATTERNS:
@@ -163,14 +181,10 @@ class Brain:
         if not self.api_key:
             raise SystemExit("TYPESAFE_API_KEY is not set (put it in .env)")
         self.model = model or config.JEV_MODEL
-        self.http = httpx.Client(
-            timeout=15.0,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            http2=False,
-        )
+        self.headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         # Keep the TCP+TLS connection warm so the first real command is fast.
         try:
-            self.http.get("https://api.typesafe.ai/v1/models")
+            net.get("https://api.typesafe.ai/v1/models", headers=self.headers, timeout=5.0)
         except Exception:
             pass
 
@@ -284,7 +298,7 @@ class Brain:
         }
         payload = {"state": state, "model": self.model, "questions": self._questions(cands, apps)}
         t0 = time.perf_counter()
-        r = self.http.post(config.TYPESAFE_URL, json=payload)
+        r = net.post_json(config.TYPESAFE_URL, payload, headers=self.headers, timeout=15.0)
         r.raise_for_status()
         data = r.json()
         ms = int((time.perf_counter() - t0) * 1000)
@@ -369,13 +383,22 @@ class Brain:
         return Plan(utterance, action, conf, args, ans, ms)
 
 
-_SUBMIT_ONLY = re.compile(r"^(?:then\s+)?(?:hit|press|and)?\s*(?:enter|return|send|submit)(?:\s+it)?$", re.I)
+_SUBMIT_ONLY = re.compile(
+    r"^(?:then\s+)?(?:hit|press|and)?\s*(?:enter|return|send|submit)(?:\s+it)?$"
+    r"|^(?:然后|再)?(?:按|敲|点)?(?:回车键|回车|发送|提交|搜索)$",
+    re.I,
+)
 
 
 def split_compound(utterance: str) -> list[str]:
-    """Split 'A and then B' into parts. A trailing 'hit enter' is not its own step:
-    the type_text plan already carries submit=True."""
-    parts = [p.strip(" ,.") for p in _SPLIT_COMPOUND.split(utterance)]
+    """Split 'A and then B' / 'A 然后 B' into parts. A trailing 'hit enter' is not its own
+    step: the type_text plan already carries submit=True."""
+    m = _OPEN_THEN_VERB.match(utterance)
+    if m:
+        return [f"{m.group(1)}{m.group(2)}", f"{m.group(3)}{m.group(4)}"]
+    parts = _SPLIT_COMPOUND_ZH.split(utterance)
+    parts = [p for chunk in parts for p in _SPLIT_COMPOUND.split(chunk)]
+    parts = [p.strip(" ,.，。") for p in parts]
     parts = [p for p in parts if len(p) > 1]
     if len(parts) > 1 and _SUBMIT_ONLY.match(parts[-1]):
         parts = parts[:-1]

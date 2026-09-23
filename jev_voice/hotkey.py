@@ -33,11 +33,15 @@ def capslock_remapped() -> bool:
 
 
 def request_permissions() -> dict[str, bool]:
-    """Trigger the macOS Accessibility + Input Monitoring prompts for this process."""
-    out = {}
+    """Best-effort permission status for this process, without ApplicationServices bindings.
+
+    Accessibility is probed by asking System Events for a trivial value (the same
+    check the execution layer uses); Input Monitoring via Quartz's preflight.
+    """
+    out: dict[str, bool] = {}
     try:
-        from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt  # type: ignore
-        out["accessibility"] = bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
+        from . import actions
+        out["accessibility"] = actions.accessibility_ok()
     except Exception:
         out["accessibility"] = False
     try:

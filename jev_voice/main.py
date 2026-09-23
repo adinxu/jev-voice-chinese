@@ -1,15 +1,16 @@
 """Jev Voice: speak to your Mac.
 
-    uv run jev-voice                     # hands-free: say "Alfred, ..." (or tap Caps Lock, then speak)
-    uv run jev-voice --hold              # Caps Lock: hold to talk (tap = toggle), no wake word
-    uv run jev-voice --always-on         # open mic, every utterance is a command (no wake word)
-    uv run jev-voice --ptt               # press Enter to talk, Enter to stop
-    uv run jev-voice --text "open chrome and go to youtube"      # no mic
-    uv run jev-voice --text "..." --dry-run                        # plan only
+    jev                                  # hands-free: say "Alfred, ..." (or tap Caps Lock, then speak)
+    jev --hold                           # Caps Lock: hold to talk (tap = toggle), no wake word
+    jev --always-on                      # open mic, every utterance is a command (no wake word)
+    jev --ptt                            # press Enter to talk, Enter to stop
+    jev --text "open chrome and go to youtube"      # no mic
+    jev --text "..." --dry-run                      # plan only
 """
 from __future__ import annotations
 
 import argparse
+import array
 import os
 import queue
 import re
@@ -18,11 +19,10 @@ import sys
 import threading
 import time
 
-import numpy as np
-
 from . import actions, config
 from .brain import Brain, Plan, split_compound
 from .overlay import NullOverlay
+from .pcm import concat
 from .persona import flavor
 from .tts import Speaker
 
@@ -196,7 +196,7 @@ class Session:
         self.listener.stop()
         self.stt.stop()
 
-    def process(self, pcm: np.ndarray) -> bool:
+    def process(self, pcm: array.array) -> bool:
         """Transcribe + plan + execute. Returns False on 'stop'."""
         if len(pcm) < config.SAMPLE_RATE * 0.25:
             return True
@@ -219,8 +219,30 @@ class Session:
 
 WAKE_WORDS = [w.strip().lower() for w in os.environ.get("WAKE_WORDS", "alfred,jarvis,alfie,alford,elfred").split(",") if w.strip()]
 FOLLOWUP_SECONDS = float(os.environ.get("FOLLOWUP_SECONDS", "8"))
-_WAKE_RE = re.compile(r"^\W*(?:hey|hi|ok|okay|yo)?\W*(?P<w>" + "|".join(map(re.escape, WAKE_WORDS)) + r")\b\W*", re.I)
-_WAKE_ANY = re.compile(r"\W*\b(?:" + "|".join(map(re.escape, WAKE_WORDS)) + r")\b\W*", re.I)
+
+
+_CJK = re.compile(r"[\u3400-\u9fff]")
+
+
+def _wake_alt(wake_words: list[str]) -> str:
+    """Build the wake-word alternation. ASCII entries get word boundaries and tolerate
+    punctuation between words ("Hey, Max"); CJK entries match as a substring (Chinese
+    transcripts usually have no spaces) and can span stray spaces."""
+    parts = []
+    for w in wake_words:
+        toks = [re.escape(t) for t in w.split()]
+        if _CJK.search(w):
+            parts.append(r"\W*".join(toks))
+        else:
+            # leading word boundary, but allow CJK (a word char) to follow so that
+            # "Runa把音量调大" (no space) still matches.
+            parts.append(r"\b" + r"\W+".join(toks) + r"(?![A-Za-z0-9])")
+    return "|".join(parts)
+
+
+_ALT = _wake_alt(WAKE_WORDS)
+_WAKE_RE = re.compile(r"^\W*(?:hey|hi|ok|okay|yo)?\W*(?P<w>" + _ALT + r")\W*", re.I)
+_WAKE_ANY = re.compile(r"(?:" + _ALT + r")", re.I)
 
 
 UNNAMED_COMMANDS = os.environ.get("UNNAMED_COMMANDS", "1") not in ("0", "false", "no")
@@ -232,28 +254,56 @@ def _fuzzy_wake(word: str) -> bool:
     import difflib
 
     w = word.lower().strip("',.!?;:")
-    if len(w) < 4:
+    if not w:
         return False
     for target in WAKE_WORDS:
-        if w == target or difflib.SequenceMatcher(None, w, target).ratio() >= 0.75:
+        if w == target:
+            return True
+        if _CJK.search(target) or _CJK.search(w):
+            if len(w) >= 2 and difflib.SequenceMatcher(None, w, target).ratio() >= 0.5:
+                return True
+        elif len(w) >= 4 and difflib.SequenceMatcher(None, w, target).ratio() >= 0.75:
             return True
     return False
 
 
+def _fuzzy_cjk_strip(text: str) -> str | None:
+    """Find a misspelled CJK wake word inside unspaced Chinese text and return the
+    remainder. Used because `word.split()` cannot isolate a name in "路那打开Safari"."""
+    import difflib
+
+    compact = text
+    for target in WAKE_WORDS:
+        tg = target.replace(" ", "")
+        if not _CJK.search(tg) or len(tg) < 2:
+            continue
+        for length in (len(tg), len(tg) + 1, len(tg) - 1):
+            if length < 2:
+                continue
+            for i in range(0, max(0, len(compact) - length) + 1):
+                if difflib.SequenceMatcher(None, compact[i:i + length], tg).ratio() >= 0.5:
+                    return (compact[:i] + compact[i + length:]).strip(" ,，。")
+    return None
+
+
 def strip_wake(text: str) -> tuple[bool, str]:
     """Return (addressed_to_us, command_text). The name may lead or appear anywhere,
-    and whisper's misspellings of it (Alfrid, Halford, Alford's) count too."""
+    and whisper's misspellings of it (Alfrid, 路那, Lunar) count too."""
     m = _WAKE_RE.match(text)
     if m:
         return True, text[m.end():].strip()
-    if _WAKE_ANY.search(text):
-        return True, _WAKE_ANY.sub(" ", text, count=1).strip(" ,.")
+    m = _WAKE_ANY.search(text)
+    if m:
+        return True, (text[:m.start()] + " " + text[m.end():]).strip(" ,，。")
     words = text.split()
     for i, w in enumerate(words):
         if _fuzzy_wake(w):
-            rest = " ".join(words[:i] + words[i + 1:]).strip(" ,.")
+            rest = " ".join(words[:i] + words[i + 1:]).strip(" ,，。")
             rest = re.sub(r"^(?:hey|hi|ok|okay|yo)\W+", "", rest, flags=re.I)
             return True, rest
+    rest = _fuzzy_cjk_strip(text)
+    if rest is not None:
+        return True, rest
     return False, text
 
 
@@ -261,8 +311,8 @@ def strip_wake(text: str) -> tuple[bool, str]:
 
 def run_smart(s: Session) -> None:
     """Hands-free. Mic is always open; only utterances that name the assistant (or follow
-    a command within FOLLOWUP_SECONDS, or follow a Caps Lock tap) are sent to Jev."""
-    from .hotkey import CapsLockListener, capslock_remapped, remap_capslock
+    a command within FOLLOWUP_SECONDS) are sent to Jev. Caps Lock push-to-talk is opt-in
+    via CAPSLOCK_PTT=1, which remaps Caps Lock to F18 (Caps Lock stops toggling capitals)."""
 
     armed = {"until": 0.0}
 
@@ -274,13 +324,17 @@ def run_smart(s: Session) -> None:
         ding(SOUND_START)
         arm(10.0)
 
-    if not capslock_remapped():
-        remap_capslock()
-    tap = CapsLockListener(on_press, lambda: None)
-    caps = tap.start()
+    caps = False
+    caps_enabled = os.environ.get("CAPSLOCK_PTT", "0").strip().lower() in ("1", "true", "yes", "on")
+    if caps_enabled:
+        from .hotkey import CapsLockListener, capslock_remapped, remap_capslock
+        if not capslock_remapped():
+            remap_capslock()
+        tap = CapsLockListener(on_press, lambda: None)
+        caps = tap.start()
     names = ", ".join(w.capitalize() for w in WAKE_WORDS[:2])
     print(f"🎙  Hands-free. Say \"{names.split(', ')[0]}, open chrome\"."
-          + (" Or tap CAPS LOCK then speak." if caps else " (Caps Lock tap unavailable: no Accessibility/Input Monitoring.)")
+          + (" Or tap CAPS LOCK then speak." if caps else "")
           + f"  (Jev {s.brain.model}, whisper base.en, voice {s.speaker.engine}:{s.speaker.voice})")
     if FEEDBACK == "voice":
         s.speaker.say(flavor("Ready."))
@@ -345,20 +399,20 @@ def run_capslock(s: Session) -> None:
         if not capslock_remapped():
             print("⚠ Could not remap Caps Lock with hidutil. Run scripts/setup.sh.")
     recording = threading.Event()
-    done: queue.Queue[np.ndarray] = queue.Queue()
+    done: queue.Queue[array.array] = queue.Queue()
     state = {"pressed_at": 0.0, "latched": False}
 
     def collector() -> None:
         while True:
             recording.wait()
             s.listener.drain()
-            parts: list[np.ndarray] = []
+            parts: list[array.array] = []
             while recording.is_set():
                 try:
                     parts.append(s.listener.q.get(timeout=0.05))
                 except queue.Empty:
                     pass
-            done.put(np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32))
+            done.put(concat(parts) if parts else array.array("f"))
 
     threading.Thread(target=collector, daemon=True).start()
 
@@ -426,7 +480,7 @@ def run_ptt(s: Session) -> None:
         input("  [Enter] to talk… ")
         s.listener.drain()
         print("  recording, [Enter] to stop")
-        parts: list[np.ndarray] = []
+        parts: list[array.array] = []
         stop = threading.Event()
 
         def _collect() -> None:
@@ -440,7 +494,7 @@ def run_ptt(s: Session) -> None:
         th.start()
         input()
         stop.set(); th.join()
-        if parts and not s.process(np.concatenate(parts)):
+        if parts and not s.process(concat(parts)):
             break
 
 
@@ -476,7 +530,7 @@ def main() -> None:
     p.add_argument("--hold", action="store_true", help="Caps Lock hold-to-talk only, no wake word")
     p.add_argument("--always-on", action="store_true", help="open mic, every utterance is a command (no wake word)")
     p.add_argument("--ptt", action="store_true", help="push-to-talk in the terminal (Enter to start/stop)")
-    p.add_argument("--device", help="input device index or name substring (see `uv run python -m sounddevice`)")
+    p.add_argument("--device", help="input device index or name substring (see `.venv/bin/python -m sounddevice`)")
     p.add_argument("--quiet", action="store_true", help="no spoken replies")
     p.add_argument("--no-overlay", action="store_true", help="no floating transcription pill")
     args = p.parse_args()

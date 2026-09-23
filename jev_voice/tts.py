@@ -19,9 +19,7 @@ import threading
 from functools import lru_cache
 from pathlib import Path
 
-import httpx
-
-from . import config
+from . import config, net
 
 CACHE_DIR = Path(os.environ.get("JEV_TTS_CACHE", Path.home() / ".cache" / "jev-voice" / "tts"))
 ENGINE = os.environ.get("TTS_ENGINE", "elevenlabs" if os.environ.get("ELEVENLABS_API_KEY") else "say")
@@ -79,7 +77,6 @@ class Speaker:
         self.voice = ELEVEN_VOICE if self.engine == "elevenlabs" else best_say_voice()
         self.rate = config.TTS_RATE
         self.proc: subprocess.Popen | None = None
-        self.http = httpx.Client(timeout=8.0, headers={"xi-api-key": ELEVEN_KEY})
         self._lock = threading.Lock()
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if self.engine == "elevenlabs":
@@ -129,11 +126,12 @@ class Speaker:
     def _synthesize(self, text: str) -> Path | None:
         p = self._key(text)
         try:
-            r = self.http.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}",
-                params={"output_format": "mp3_22050_32"},
-                json={"text": text, "model_id": ELEVEN_MODEL,
-                      "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": float(ELEVEN_SPEED)}},
+            r = net.post_json(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}?output_format=mp3_22050_32",
+                {"text": text, "model_id": ELEVEN_MODEL,
+                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": float(ELEVEN_SPEED)}},
+                headers={"xi-api-key": ELEVEN_KEY},
+                timeout=8.0,
             )
             r.raise_for_status()
             tmp = p.with_suffix(".part")

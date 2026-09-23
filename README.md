@@ -18,12 +18,17 @@ cp .env.example .env                       # add your TYPESAFE_API_KEY from cons
 ./scripts/setup.sh
 ```
 
-The script installs whisper-cpp + ffmpeg, downloads the model, syncs the Python
-env, remaps **Caps Lock → F18** with `hidutil` (persisted by a LaunchAgent so it
+The script installs whisper-cpp, downloads the model, creates the Python venv,
+remaps **Caps Lock → F18** with `hidutil` (persisted by a LaunchAgent so it
 survives reboots), installs a `jev` launcher in `~/.local/bin`, and opens the
 three permission panes. Grant the terminal app you launch from (Cursor / Terminal /
 iTerm) **Microphone**, **Accessibility** and **Input Monitoring**. If a permission
 is missing at launch, Jev Voice prompts for it and waits.
+
+Runtime dependencies are only `pyobjc-framework-cocoa`, `pyobjc-framework-quartz`
+and `sounddevice`; HTTP, audio buffers and the Whisper client use the standard
+library, and system tools (`open`, `osascript`, `screencapture`, `pmset`) do the
+rest.
 
 Undo the Caps Lock remap any time: `./scripts/uninstall-capslock.sh`.
 
@@ -34,7 +39,7 @@ jev                                 # hands-free: "Alfred, open chrome" (or tap 
 jev --hold                          # hold CAPS LOCK to talk, release to run; no wake word
 jev --always-on                     # open mic, EVERY utterance is a command (no wake word)
 jev --ptt                           # push-to-talk in the terminal: Enter start / Enter stop
-jev --device "RØDE"                 # pick a mic (uv run python -m sounddevice)
+jev --device "RØDE"                 # pick a mic (.venv/bin/python -m sounddevice)
 jev --text "open chrome and go to youtube" --dry-run   # test routing, no mic
 ```
 
@@ -113,6 +118,8 @@ jev_voice/
   actions.py  macOS execution (open, keystrokes, scroll, volume, media keys…)
   audio.py    mic + VAD endpointing
   stt.py      whisper-server client
+  net.py      stdlib HTTP client with connection reuse (replaces httpx)
+  pcm.py      stdlib audio buffers (replaces numpy)
   tts.py      macOS `say`
   config.py   env / thresholds
   hotkey.py   Caps Lock (remapped to F18) global key tap

@@ -1,8 +1,6 @@
 """macOS execution layer. Everything here is plain code: no model involved."""
 from __future__ import annotations
 
-import os
-import shlex
 import subprocess
 import time
 from functools import lru_cache

@@ -1,14 +1,15 @@
 """Microphone capture with energy-based voice activity detection and endpointing."""
 from __future__ import annotations
 
+import array
 import queue
 import time
 from dataclasses import dataclass
 
-import numpy as np
 import sounddevice as sd
 
 from . import config
+from .pcm import concat, rms
 
 FRAME_MS = 30
 FRAME = config.SAMPLE_RATE * FRAME_MS // 1000
@@ -25,22 +26,36 @@ class VADConfig:
     floor_min: float = 0.004
 
 
+def vad_from_config() -> VADConfig:
+    """Build the VAD settings from config (all overridable via .env)."""
+    return VADConfig(
+        start_frames=config.VAD_START_FRAMES,
+        end_silence_ms=config.VAD_END_SILENCE_MS,
+        min_speech_ms=config.VAD_MIN_SPEECH_MS,
+        max_speech_ms=config.VAD_MAX_SPEECH_MS,
+        pre_roll_ms=config.VAD_PRE_ROLL_MS,
+        threshold_mult=config.VAD_THRESHOLD_MULT,
+    )
+
+
 class Listener:
     """Yields float32 16 kHz mono utterances. Call `pause()` while the assistant speaks."""
 
     def __init__(self, device: int | str | None = None, vad: VADConfig | None = None) -> None:
-        self.vad = vad or VADConfig()
-        self.q: queue.Queue[np.ndarray] = queue.Queue()
+        self.vad = vad or vad_from_config()
+        self.q: queue.Queue[array.array] = queue.Queue()
         self.paused_until = 0.0
         self.noise = 0.01
         self.on_speech_start = None  # optional callback fired when an utterance begins
-        self.stream = sd.InputStream(
+        self.stream = sd.RawInputStream(
             samplerate=config.SAMPLE_RATE, channels=1, dtype="float32", blocksize=FRAME,
             device=device, callback=self._cb,
         )
 
     def _cb(self, indata, frames, t, status) -> None:  # noqa: ANN001
-        self.q.put(indata[:, 0].copy())
+        buf = array.array("f")
+        buf.frombytes(bytes(indata))
+        self.q.put(buf)
 
     def start(self) -> None:
         self.stream.start()
@@ -59,11 +74,11 @@ class Listener:
             except queue.Empty:
                 break
 
-    def next_utterance(self) -> np.ndarray:
+    def next_utterance(self) -> array.array:
         v = self.vad
         pre_n = v.pre_roll_ms // FRAME_MS
-        ring: list[np.ndarray] = []
-        speech: list[np.ndarray] = []
+        ring: list[array.array] = []
+        speech: list[array.array] = []
         loud_run = 0
         silence_ms = 0
         in_speech = False
@@ -72,12 +87,12 @@ class Listener:
             if time.monotonic() < self.paused_until:
                 ring.clear(); speech.clear(); in_speech = False; loud_run = 0
                 continue
-            rms = float(np.sqrt(np.mean(frame * frame)) + 1e-9)
+            level = rms(frame) + 1e-9
             if not in_speech:
                 # adaptive noise floor (slow up, fast down)
-                self.noise = self.noise * 0.98 + rms * 0.02 if rms > self.noise else self.noise * 0.9 + rms * 0.1
+                self.noise = self.noise * 0.98 + level * 0.02 if level > self.noise else self.noise * 0.9 + level * 0.1
             thresh = max(v.floor_min, self.noise * v.threshold_mult)
-            loud = rms > thresh
+            loud = level > thresh
             if not in_speech:
                 ring.append(frame)
                 if len(ring) > pre_n:
@@ -98,5 +113,5 @@ class Listener:
             dur = len(speech) * FRAME_MS
             if silence_ms >= v.end_silence_ms or dur >= v.max_speech_ms:
                 if dur - silence_ms >= v.min_speech_ms:
-                    return np.concatenate(speech)
+                    return concat(speech)
                 ring.clear(); speech.clear(); in_speech = False; loud_run = 0

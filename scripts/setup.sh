@@ -6,8 +6,7 @@ cd "$ROOT"
 
 echo "▸ Homebrew deps"
 command -v brew >/dev/null || { echo "Install Homebrew first: https://brew.sh"; exit 1; }
-for f in whisper-cpp ffmpeg; do brew list --formula "$f" >/dev/null 2>&1 || brew install "$f"; done
-command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+brew list --formula whisper-cpp >/dev/null 2>&1 || brew install whisper-cpp
 
 echo "▸ Whisper model"
 mkdir -p models
@@ -15,8 +14,10 @@ mkdir -p models
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 
 echo "▸ Python env"
-uv sync -q
 [ -f .env ] || { echo "Missing .env with TYPESAFE_API_KEY=..."; exit 1; }
+python3 -m venv .venv
+.venv/bin/python -m pip install -q --upgrade pip
+.venv/bin/python -m pip install -q -e .
 
 echo "▸ Caps Lock → F18 (hidutil), persisted with a LaunchAgent"
 MAPPING='{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x70000006D}]}'
@@ -41,7 +42,7 @@ echo "▸ 'jev' launcher in ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/jev" <<LAUNCH
 #!/bin/zsh
-cd "$ROOT" && exec uv run jev-voice "\$@"
+cd "$ROOT" && exec .venv/bin/python -m jev_voice.main "\$@"
 LAUNCH
 chmod +x "$HOME/.local/bin/jev"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc";; esac

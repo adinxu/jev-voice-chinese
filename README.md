@@ -1,5 +1,7 @@
 # Jev Voice
 
+> 中文用户请看下方 **[中文使用说明](#中文使用说明)**（完整文档见 [USAGE.zh-CN.md](USAGE.zh-CN.md)）。
+
 Talk to your Mac. You speak, it opens apps, types, searches, scrolls, presses keys.
 
 Everything runs locally except one ~250 ms call to **Jev** (TypeSafe's System One
@@ -10,6 +12,48 @@ and Jev *selects*. Code owns execution.
 ```
 mic ─► energy VAD ─► whisper.cpp (Metal, ~100 ms) ─► Jev (1 request, ~250 ms) ─► macOS actions ─► `say`
 ```
+
+## 中文使用说明
+
+本仓库在原版基础上新增了 **中文语音支持**，并精简了运行依赖。完整文档见 [USAGE.zh-CN.md](USAGE.zh-CN.md)。
+
+**安装**（与原版一致）：
+
+```sh
+cp .env.example .env          # 填入 TYPESAFE_API_KEY
+./scripts/setup.sh
+```
+
+**中文配置**（`.env`）：
+
+```env
+WHISPER_MODEL=/绝对路径/models/ggml-small.bin   # 多语言模型（不要用 .en 英文专用版）
+WHISPER_LANG=zh
+WHISPER_TRANSLATE=0                             # 中文直接交给 Jev，无需翻译
+WAKE_WORDS=露娜,路那,路纳,路納,入那,luna           # 唤醒词 + 常见同音变体
+FOLLOWUP_SECONDS=10                             # 喊一次后 10 秒内可连续说
+UNNAMED_COMMANDS=0                              # 必须含唤醒词才发送给 Jev
+```
+
+**使用**：运行 `jev`，然后说：
+
+```text
+露娜 打开 Safari
+露娜 去 youtube
+露娜 搜索 youtube 上的 lofi 音乐
+露娜 把音量调大
+露娜 截个屏
+露娜 打开备忘录输入买牛奶          # 复合：先打开备忘录，再输入
+```
+
+喊一次「露娜」后有 10 秒免唤醒窗口，可连续下指令；超时后再喊一次即可。
+
+**要点**：
+
+- 中文识别需 **多语言模型**（如 `models/ggml-small.bin`）；上面配置已指向它。
+- 运行依赖仅 `pyobjc-framework-cocoa`、`pyobjc-framework-quartz`、`sounddevice`；HTTP、音频缓冲、Whisper 客户端均用标准库，系统工具用 `open` / `osascript` / `screencapture` / `pmset`。
+- 唤醒词、语言、VAD、连续对话窗口等都在 `.env` 中配置，**无需改代码**。
+- 英文逻辑保持兼容：英文唤醒词与英文指令照常可用。
 
 ## Setup (macOS, Apple Silicon)
 
